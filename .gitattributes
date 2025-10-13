@@ -1,0 +1,9 @@
+elliptic_dataset/AddrAddr_edgelist.csv filter=lfs diff=lfs merge=lfs -text
+elliptic_dataset/AddrTx_edgelist.csv filter=lfs diff=lfs merge=lfs -text
+elliptic_dataset/txs_classes.csv filter=lfs diff=lfs merge=lfs -text
+elliptic_dataset/TxAddr_edgelist.csv filter=lfs diff=lfs merge=lfs -text
+elliptic_dataset/txs_edgelist.csv filter=lfs diff=lfs merge=lfs -text
+elliptic_dataset/txs_features.csv filter=lfs diff=lfs merge=lfs -text
+elliptic_dataset/wallets_classes.csv filter=lfs diff=lfs merge=lfs -text
+elliptic_dataset/wallets_features.csv filter=lfs diff=lfs merge=lfs -text
+elliptic_dataset/wallets_features_classes_combined.csv filter=lfs diff=lfs merge=lfs -text
