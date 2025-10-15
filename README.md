@@ -31,6 +31,6 @@ git lfs pull
  7. Finally click the big "Deploy On-Demand" button.
  8. The pod will be set up with all the dependencies and on startup credentails for our git repo will be configured - they are stored in teh network volume and will just get initialised.
  9. Once the pod builds, you should see a "jupyterlab" button. Click that and jupyter will open in your browser. You can acess the terminal and the storage volume from there.
- 10. You should be read to go.
+ 10. You should be ready to go.
 
  **Also please be sure NOT to delete the storage volume, and remember to terminate the pod once you are done using it!!! Otherwise it will be idling and burning through funds.**
