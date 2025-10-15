@@ -33,4 +33,4 @@ git lfs pull
  9. Once the pod builds, you should see a "jupyterlab" button. Click that and jupyter will open in your browser. You can acess the terminal and the storage volume from there.
  10. You should be read to go.
 
- **Also please be sure NOT to delte the storage volume, and remember to terminate the pod once you are done using it!!! Otherwise it will be idling and burning through funds.**
+ **Also please be sure NOT to delete the storage volume, and remember to terminate the pod once you are done using it!!! Otherwise it will be idling and burning through funds.**
