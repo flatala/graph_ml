@@ -17,8 +17,9 @@ git lfs install
 git lfs pull
  </pre>
 
+---
 
- ### RunPod CLuster Setup
+ ### RunPod Cluster Setup
 
  **Steps:**
  1. Go to RunPod.
