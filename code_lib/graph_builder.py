@@ -324,7 +324,7 @@ def get_labels(
     # if it is specified so, ignore the transactors that are illict themselves
     # (it might be more interesting to look for illicit emergence where tehre is no illicit nodes)
     if ignore_illict:
-        future_illicit_transactor_adresses = future_illicit_transactor_adresses - all_illicit_addresses
+        future_illicit_transactor_adresses = future_illicit_transactor_adresses - existing_illicit_at_t
     
     # if it is specified so, also ignore nodes that have
     # previously transacted with illicit nodes
@@ -334,11 +334,11 @@ def get_labels(
         edges_up_to_t = edges_df[edges_df['Time step'] <= current_time_step]
         
         # check for edges to illicit addresses
-        to_illicit_mask = edges_up_to_t['output_address'].isin(all_illicit_addresses)
+        to_illicit_mask = edges_up_to_t['output_address'].isin(existing_illicit_at_t)
         src_to_illicit = set(edges_up_to_t.loc[to_illicit_mask, 'input_address'].values)
         
         # check for edges from illicit adresses
-        from_illicit_mask = edges_up_to_t['input_address'].isin(all_illicit_addresses)
+        from_illicit_mask = edges_up_to_t['input_address'].isin(existing_illicit_at_t)
         dst_from_illicit = set(edges_up_to_t.loc[from_illicit_mask, 'output_address'].values)
         
         # combine both
