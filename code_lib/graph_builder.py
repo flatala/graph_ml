@@ -386,8 +386,8 @@ def get_labels(
             if ignore_previously_transacting_with_illicit and node_address in nodes_with_illicit_history:
                 continue
 
-            # if it is specified to not label illicit nodes
-            if ignore_illict and node_address in all_illicit_addresses:
+            # if it is specified to not label illicit nodes (that exist at time t)
+            if ignore_illict and node_address in existing_illicit_at_t:
                 continue
 
             # this node itself will transact with new illicit
@@ -432,10 +432,10 @@ def get_labels(
             # if we dont want to label nodes with illicit transaction history
             if ignore_previously_transacting_with_illicit and node_address in nodes_with_illicit_history:
                 continue
-            
-            # if it is specified to not label illicit nodes
-            if ignore_illict and node_address in all_illicit_addresses:
-                continue  
+
+            # if it is specified to not label illicit nodes (that exist at time t)
+            if ignore_illict and node_address in existing_illicit_at_t:
+                continue
 
             # this node itself will transact with new illicit
             if node_id in future_illicit_transactor_id_set:
