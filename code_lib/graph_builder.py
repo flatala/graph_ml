@@ -175,6 +175,81 @@ def compute_reachability_matrix(adjacency_matrix, max_walk_length):
     return reachability
 
 
+def compute_reachability_to_targets(adjacency_matrix, target_nodes, max_walk_length):
+    """
+    Compute reachability from ALL nodes to a SUBSET of target nodes (much faster).
+    
+    This is significantly faster than computing the full reachability matrix when
+    the number of target nodes is small compared to the total number of nodes.
+    
+    Uses reverse BFS from target nodes to find reachability efficiently.
+    
+    Args:
+        adjacency_matrix: scipy.sparse.csr_matrix, adjacency matrix
+        target_nodes: array-like, indices of target nodes
+        max_walk_length: int, maximum walk length
+    
+    Returns:
+        scipy.sparse.csr_matrix: boolean matrix [num_nodes, num_targets] where
+        [i,j] = 1 if target j is reachable from node i within max_walk_length hops
+    """
+    num_nodes = adjacency_matrix.shape[0]
+    num_targets = len(target_nodes)
+    
+    if num_targets == 0:
+        return sp.csr_matrix((num_nodes, 0))
+    
+    # Convert target_nodes to numpy array for indexing
+    target_nodes = np.asarray(target_nodes)
+    
+    # Transpose adjacency for reverse search (who can reach the targets)
+    adj_T = adjacency_matrix.T.tocsr()
+    
+    # Build list of column data (more efficient than incremental sparse matrix updates)
+    reachability_columns = []
+    
+    # For each target node, do a BFS to find who can reach it
+    for target_idx, target_node in enumerate(target_nodes):
+        # Track visited nodes
+        visited = np.zeros(num_nodes, dtype=bool)
+        
+        # Start from the target node (using lil_matrix for efficient single element setting)
+        current_frontier = sp.lil_matrix((num_nodes, 1))
+        current_frontier[target_node, 0] = 1
+        current_frontier = current_frontier.tocsr()
+        visited[target_node] = True
+        
+        # BFS for up to max_walk_length hops
+        for hop in range(1, max_walk_length + 1):
+            # Find nodes that can reach current frontier in one hop
+            # (reverse: who has edges TO current frontier)
+            next_frontier = adj_T @ current_frontier
+            
+            # Only keep unvisited nodes
+            next_frontier_array = next_frontier.toarray().flatten()
+            newly_reached = (next_frontier_array > 0) & ~visited
+            
+            if not newly_reached.any():
+                break
+            
+            # Mark as visited
+            visited[newly_reached] = True
+            
+            # Update frontier for next iteration
+            current_frontier = sp.csr_matrix(newly_reached.reshape(-1, 1).astype(float))
+        
+        # Store this column as a sparse vector (who can reach this target)
+        reachability_columns.append(sp.csr_matrix(visited.reshape(-1, 1).astype(float)))
+    
+    # Horizontally stack all columns to create the final matrix
+    if reachability_columns:
+        reachability = sp.hstack(reachability_columns, format='csr')
+    else:
+        reachability = sp.csr_matrix((num_nodes, 0))
+    
+    return reachability
+
+
 def compute_distance_matrix(adjacency_matrix, max_walk_length):
     """
     Compute a distance matrix from any node in the graph to any other node.
@@ -588,22 +663,25 @@ def get_labels(
 
         return torch.tensor(labels, dtype=torch.long)
 
-    # in the case it is specified to only use thebinary labels
+    # in the case it is specified to only use the binary labels
     else:
         labels = torch.zeros(num_nodes, dtype=torch.long)
 
-        # compute k-hop reachability matrix
+        # if no nodes emerged at t will transact with future illicit, return all zeros
+        if len(future_illicit_transactor_adresses) == 0:
+            return labels
+
+        # OPTIMIZATION: Compute reachability only to target nodes (much faster!)
         t0 = time.time()
-        reachability = compute_reachability_matrix(adjacency_matrix, max_walk_length)
+        reachability_to_illicit = compute_reachability_to_targets(
+            adjacency_matrix, 
+            future_illicit_transactor_ids, 
+            max_walk_length
+        )
         label_timings['compute_reachability'] = time.time() - t0
 
-        # only keep columns corresponding to emerged nodes
-        # that will transact with future illicit nodes
-        reachability_to_illicit_transactors = reachability[:, future_illicit_transactor_ids]
-
-        # check if a node will have a node transacting with a future illicit in its neighbourhood
-        # this also check if the node will transact itself
-        has_new_illicit_in_neighborhood = (reachability_to_illicit_transactors.sum(axis=1) > 0).A1
+        # check if a node can reach any of the target nodes (has illicit in neighborhood)
+        has_new_illicit_in_neighborhood = (reachability_to_illicit.sum(axis=1) > 0).A1
         
         t0 = time.time()
         for node_id in range(num_nodes):
