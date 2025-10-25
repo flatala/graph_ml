@@ -50,4 +50,6 @@ def convert_to_temporal_snapshots(snapshots: List[Data]) -> DynamicGraphTemporal
     return DynamicGraphTemporalSignal(edge_indices, edge_weights, features, targets)
 
 def convert_to_event_stream():
+
+    
     return
