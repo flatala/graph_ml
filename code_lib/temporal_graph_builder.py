@@ -65,7 +65,7 @@ def convert_to_event_stream(snapshots: List[Data], dense: bool):
         A TemporalData object that represents the event stream.
     """
     #initialization of event lists
-    src_list, dst_list, t_list = [], [], []
+    src_list, dst_list, t_list, msg_list, label_list = [], [], [], [], []
     
 
     #Need to check if we have previous mappings, since we'd like to keep track of updates and deletions of nodes and events
@@ -80,6 +80,10 @@ def convert_to_event_stream(snapshots: List[Data], dense: bool):
     has_edge_attr = hasattr(snapshots[0], 'edge_attr') and getattr(snapshots[0], 'edge_attr') is not None
     
     for t, d in enumerate(snapshots):
+
+        feature_dim = d.x.size(1)
+        msg_dim = feature_dim*2
+
         ei = d.edge_index
         mapping = edge_map(ei)
 
@@ -122,6 +126,14 @@ def convert_to_event_stream(snapshots: List[Data], dense: bool):
         evt_type_list.append(torch.full((len(idx),), 1, dtype=torch.int8))
 
 
+        label_values = (d.y[ei[1, idx_t]]).float()
+        label_list.append(label_values.view(-1, 1))
+
+        src_feat = d.x[ei[0, idx_t]]
+        dst_feat = d.x[ei[1, idx_t]]
+
+        msg_list.append(torch.cat(([src_feat, dst_feat]), dim=-1))
+
 
 
         
@@ -134,13 +146,27 @@ def convert_to_event_stream(snapshots: List[Data], dense: bool):
             dst_list.append(v)
             t_list.append(torch.full((u.numel(),), t, dtype=torch.long))
             evt_type_list.append(torch.full((u.numel(),), -1, dtype=torch.int8))
+            
+            deleted_msg = torch.zeros((len(deleted_edges), msg_dim), dtype=d.x.dtype)
+            label_list.append(torch.zeros((len(deleted_edges), 1), dtype=torch.float32))
+            msg_list.append(deleted_msg)
+
+            
 
         if changed_edges:
             idx = [mapping[e] for e in changed_edges]
             idx_t = torch.tensor(idx, dtype=torch.long)
             src_list.append(ei[0, idx_t])
             dst_list.append(ei[1, idx_t])
+
+            src_feat = d.x[ei[0, idx_t]]
+            dst_feat = d.x[ei[1, idx_t]]
+            msg_list.append(torch.cat([src_feat, dst_feat], dim=-1))
+
             t_list.append(torch.full((len(idx),), t, dtype=torch.long))
+            
+            label_values = d.y[ei[1, idx_t]].float()
+            label_list.append(label_values.view(-1, 1))
             evt_type_list.append(torch.zeros(len(idx), dtype=torch.int8))
 
 
@@ -152,9 +178,12 @@ def convert_to_event_stream(snapshots: List[Data], dense: bool):
         src = torch.cat(src_list)
         dst = torch.cat(dst_list)
         tt  = torch.cat(t_list)
+        msg = torch.cat(msg_list)
         evt = torch.cat(evt_type_list)
+        labels = torch.cat(label_list).view(-1)
 
-        data = TemporalData(src=src, dst=dst, t=tt)
+        data = TemporalData(src=src, dst=dst, t=tt, msg=msg)
+        data.y = labels
         data.event_type = evt
     
     return data
