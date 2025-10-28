@@ -10,47 +10,63 @@ from collections import Counter
 from tqdm import tqdm
 
 
-def extract_node_features(nodes_up_to_t, active_addresses, address_to_local_id, keep_class_labels_as_features: bool = True):
+def extract_node_features(nodes_up_to_t, active_addresses, address_to_local_id, keep_class_labels_as_features: bool = True, add_staleness_feature: bool = False, current_time_step: int = None):
     """
     Extract latest features for each active node (OPTIMIZED VERSION).
     When a node appears multiple times, use the most recent feature values.
-    
+
     Args:
         nodes_up_to_t: DataFrame with node data up to current time step
         active_addresses: array/list of addresses active (have emerged) up to current time step
         address_to_local_id: dict mapping address -> local node ID
-    
+        keep_class_labels_as_features: bool, whether to include class labels as features
+        add_staleness_feature: bool, whether to add staleness feature (current_t - first_appearance_t)
+        current_time_step: int, current time step (required if add_staleness_feature=True)
+
     Returns:
         torch.Tensor: node features [num_nodes, num_features]
     """
 
     # include labels at t as features (exploiting the knowledge, may be bad for "unobvious" emergence)
     if keep_class_labels_as_features:
-        feature_cols = [col for col in nodes_up_to_t.columns 
+        feature_cols = [col for col in nodes_up_to_t.columns
                     if col not in ['address', 'Time step']]
 
     # don't include labels at t as features (less bias towards emergence nera illict nodes)
-    else:    
+    else:
         feature_cols = [col for col in nodes_up_to_t.columns
                     if col not in ['address', 'Time step', 'class']]
-    
+
     # we sort by time to only include latest node features
     nodes_sorted = nodes_up_to_t.sort_values('Time step', ascending=True)
 
     # use groupby to get latest row per address
     latest_per_address = nodes_sorted.groupby('address', as_index=True)[feature_cols].last()
-    
-    # prepare an empty array
-    num_features = len(feature_cols)
+
+    # prepare an empty array (potentially with staleness feature)
+    num_base_features = len(feature_cols)
+    num_features = num_base_features + (1 if add_staleness_feature else 0)
     num_active_nodes = len(active_addresses)
     node_features = np.zeros((num_active_nodes, num_features))
-    
+
+    # if staleness feature is requested, compute first appearance time for each address
+    if add_staleness_feature:
+        if current_time_step is None:
+            raise ValueError("current_time_step must be provided when add_staleness_feature=True")
+        first_appearance = nodes_sorted.groupby('address')['Time step'].min()
+
     # populate features
     for addr in active_addresses:
         if addr in latest_per_address.index:
             local_id = address_to_local_id[addr]
-            node_features[local_id] = latest_per_address.loc[addr].values
-    
+            # add base features
+            node_features[local_id, :num_base_features] = latest_per_address.loc[addr].values
+
+            # add staleness feature if requested
+            if add_staleness_feature:
+                staleness = current_time_step - first_appearance.loc[addr]
+                node_features[local_id, num_base_features] = staleness
+
     return torch.tensor(node_features, dtype=torch.float)
 
 
@@ -725,6 +741,7 @@ def build_emergence_graph_at_timestep(
     all_illicit_addresses: set = None,
     edges_by_timestep: dict = None,
     keep_class_labels_as_features: bool = False,
+    add_staleness_feature: bool = False,
     use_distance_labels: bool = True,
     max_walk_length: int = 2,
     time_horizon: int = 3,
@@ -734,11 +751,11 @@ def build_emergence_graph_at_timestep(
 ) -> Data:
     """
     Build a temporal graph snapshot at a given time step for emergence prediction.
-    
+
     This function creates a cumulative graph containing all nodes and edges that have
     appeared up to and including the current time step, along with emergence labels
     that predict future exposure to NEW illicit activity.
-    
+
     Args:
         current_time_step: int
             Current time step t for which to build the graph
@@ -753,6 +770,8 @@ def build_emergence_graph_at_timestep(
         keep_class_labels_as_features: bool, default=False
             If True, include node class labels as features (may introduce label leakage)
             If False, exclude class labels from features
+        add_staleness_feature: bool, default=False
+            If True, add a staleness feature (current_time_step - first_appearance_time) to node features
         use_distance_labels: bool, default=True
             If True, labels are distances (0, 1, 2, ..., max_walk_length+1)
             If False, labels are binary (0 or 1)
@@ -766,7 +785,7 @@ def build_emergence_graph_at_timestep(
             If True, nodes with illicit transaction history receive default labels
         profile: bool, default=False
             If True, print detailed timing information for each step
-    
+
     Returns:
         Data: PyTorch Geometric Data object with attributes:
             - x: node features [num_nodes, num_features]
@@ -805,10 +824,12 @@ def build_emergence_graph_at_timestep(
     # step 5: Extract node features
     t0 = time.time()
     node_features = extract_node_features(
-        nodes_up_to_t, 
-        active_addresses, 
+        nodes_up_to_t,
+        active_addresses,
         address_to_local_id,
-        keep_class_labels_as_features=keep_class_labels_as_features
+        keep_class_labels_as_features=keep_class_labels_as_features,
+        add_staleness_feature=add_staleness_feature,
+        current_time_step=current_time_step
     )
     timings['extract_features'] = time.time() - t0
     
@@ -873,6 +894,7 @@ def build_emergence_graphs_for_time_range(
     time_horizon: int = 3,
     use_distance_labels: bool = False,
     keep_class_labels_as_features: bool = False,
+    add_staleness_feature: bool = False,
     ignore_illict: bool = True,
     ignore_previously_transacting_with_illicit: bool = True,
     profile: bool = False,
@@ -880,8 +902,8 @@ def build_emergence_graphs_for_time_range(
     """
     Build a sequence of emergence prediction graphs across multiple time steps.
 
-    This function generates a series of temporal graph snapshots for a specified range of 
-    time steps, where each graph can be used to train or evaluate models for predicting 
+    This function generates a series of temporal graph snapshots for a specified range of
+    time steps, where each graph can be used to train or evaluate models for predicting
     the emergence of illicit activity in transaction networks.
 
     Args:
@@ -912,15 +934,17 @@ def build_emergence_graphs_for_time_range(
         keep_class_labels_as_features: bool, default=False
             If True, include node class labels as features (may cause label leakage)
             If False, exclude class labels from node features
+        add_staleness_feature: bool, default=False
+            If True, add a staleness feature (current_time_step - first_appearance_time) to node features
         ignore_illict: bool, default=True
             If True, nodes that are already illicit at time t receive default labels
-            and are excluded from the positive label set, which means that if they will be 
+            and are excluded from the positive label set, which means that if they will be
             a neighbour to a future illicit, that wont be counting towards their current
             neihbours positive labelling
         ignore_previously_transacting_with_illicit: bool, default=True
-            If True, nodes with any illicit transaction history up to time t 
+            If True, nodes with any illicit transaction history up to time t
             receive default labels and are excluded from the positive label set,
-            which means that if they will be a neighbour to a future illicit, that 
+            which means that if they will be a neighbour to a future illicit, that
             wont be counting towards their current neihbours positive labelling
         profile: bool, default=False
             If True, print detailed timing information for each step (useful for debugging performance)
@@ -976,6 +1000,7 @@ def build_emergence_graphs_for_time_range(
             all_illicit_addresses=all_illicit_addresses,  # Pass pre-computed set
             edges_by_timestep=edges_by_timestep,  # Pass pre-grouped edges
             keep_class_labels_as_features=keep_class_labels_as_features,
+            add_staleness_feature=add_staleness_feature,
             use_distance_labels=use_distance_labels,
             max_walk_length=max_walk_length,
             time_horizon=time_horizon,
