@@ -167,11 +167,12 @@ class TemporalNodeClassificationBuilder:
         """Load a graph from cache using PyTorch's native format."""
         if not self.use_cache:
             return None
-        
+
         cache_path = self._get_cache_path(timestep, return_node_metadata)
         if os.path.exists(cache_path):
             try:
-                graph = torch.load(cache_path)
+                # PyTorch 2.6+ requires weights_only=False for custom objects like PyG Data
+                graph = torch.load(cache_path, weights_only=False)
                 if self.verbose:
                     print(f"  ✅ Loaded cached graph from {cache_path}")
                 return graph
