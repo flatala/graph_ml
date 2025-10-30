@@ -167,11 +167,12 @@ class TemporalNodeClassificationBuilder:
         """Load a graph from cache using PyTorch's native format."""
         if not self.use_cache:
             return None
-        
+
         cache_path = self._get_cache_path(timestep, return_node_metadata)
         if os.path.exists(cache_path):
             try:
-                graph = torch.load(cache_path)
+                # PyTorch 2.6+ requires weights_only=False for custom objects like PyG Data
+                graph = torch.load(cache_path, weights_only=False)
                 if self.verbose:
                     print(f"  ✅ Loaded cached graph from {cache_path}")
                 return graph
@@ -424,16 +425,19 @@ class TemporalNodeClassificationBuilder:
                   f"{len(train_nodes)} nodes")
             print(f"    Illicit: {(train_nodes['class']==1).sum()}, "
                   f"Licit: {(train_nodes['class']==2).sum()}")
+            print(f"Training illicit ratio: {(train_nodes['class']==1).sum() / len(train_nodes)}")
             
             print(f"  Val:   timesteps {val_timesteps[0]}-{val_timesteps[1]}, "
                   f"{len(val_nodes)} nodes")
             print(f"    Illicit: {(val_nodes['class']==1).sum()}, "
                   f"Licit: {(val_nodes['class']==2).sum()}")
+            print(f"Validation illicit ratio: {(val_nodes['class']==1).sum() / len(val_nodes)}")
             
             print(f"  Test:  timesteps {test_timesteps[0]}-{test_timesteps[1]}, "
                   f"{len(test_nodes)} nodes")
             print(f"    Illicit: {(test_nodes['class']==1).sum()}, "
                   f"Licit: {(test_nodes['class']==2).sum()}")
+            print(f"Test illicit ratio: {(test_nodes['class']==1).sum() / len(test_nodes)}")
         
         return {
             'train': train_nodes,
@@ -576,6 +580,446 @@ def load_elliptic_data(data_dir: str, use_temporal_features: bool = True) -> Tup
     edges_df = load_parts(data_dir, "AddrTxAddr_edgelist_part_")
     
     return nodes_df, edges_df
+
+
+# ==============================================================================
+# DEPRECATED FUNCTIONS - DO NOT USE
+# ==============================================================================
+# The functions below implement INCORRECT logic for observation window experiments.
+# They have been commented out to prevent misuse.
+#
+# Issues:
+# 1. prepare_data_for_observation_window: Uses features from max_timestep for all
+#    nodes, causing temporal leakage
+# 2. prepare_data_for_observation_window_no_leakage: Extracts features at per-node
+#    evaluation times, but this is NOT the correct approach for observation windows
+#
+# Use prepare_observation_window_graphs() instead (see below)
+# ==============================================================================
+
+# def prepare_data_for_observation_window(K, builder, train_nodes, val_nodes, test_nodes, device):
+#     """DEPRECATED - DO NOT USE - Has temporal leakage"""
+#     pass
+
+# def prepare_data_for_observation_window_no_leakage(K, builder, train_nodes, val_nodes, test_nodes, device):
+#     """DEPRECATED - DO NOT USE - Incorrect logic for observation windows"""
+#     pass
+
+
+def prepare_observation_window_graphs(
+    builder: TemporalNodeClassificationBuilder,
+    train_nodes: pd.DataFrame,
+    val_nodes: pd.DataFrame,
+    test_nodes: pd.DataFrame,
+    K_values: List[int],
+    device: torch.device
+) -> Dict[int, Dict[str, Data]]:
+    """
+    Prepare graphs for observation window experiments (CORRECT implementation).
+
+    This function creates the proper setup for studying how observation windows affect
+    classification performance. For each K value, it builds separate graphs for
+    train/val/test splits where:
+
+    1. Graph structure and features come from timestep (split_end + K)
+    2. ALL nodes in the graph use features from that timestep
+    3. Evaluation mask identifies which nodes to compute loss/metrics on
+    4. Only nodes with first_appearance <= split_end are evaluated
+
+    This allows answering: "Does waiting K timesteps after a node appears improve
+    classification accuracy for nodes from a specific time period?"
+
+    Key insight: For different K values, you evaluate the SAME nodes (those in the
+    split period), but with different amounts of temporal context. This lets you
+    measure the value of observation windows.
+
+    Args:
+        builder: TemporalNodeClassificationBuilder instance
+        train_nodes: DataFrame with columns ['address', 'first_timestep', 'class']
+                    Contains nodes that first appeared in train period
+        val_nodes: Similar DataFrame for validation nodes
+        test_nodes: Similar DataFrame for test nodes
+        K_values: List of observation windows to test (e.g., [0, 3, 5, 7])
+        device: torch device (cpu/cuda/mps)
+
+    Returns:
+        Dictionary mapping K values to split dictionaries:
+        {
+            0: {
+                'train': Data(graph, eval_mask, ...),
+                'val': Data(...),
+                'test': Data(...)
+            },
+            3: { ... },
+            ...
+        }
+
+        Each Data object contains:
+        - x: node features [num_nodes, num_features]
+        - edge_index: edge indices [2, num_edges]
+        - y: node labels [num_nodes] (0=licit, 1=illicit)
+        - eval_mask: which nodes to evaluate [num_nodes] (bool tensor)
+        - num_nodes: total nodes in graph
+        - timestep: the timestep this graph represents
+        - node_address: list of addresses (for debugging)
+        - node_first_appearance: when each node first appeared
+
+    Example:
+        >>> # Setup
+        >>> builder = TemporalNodeClassificationBuilder(nodes_df, edges_df)
+        >>> split = builder.get_train_val_test_split(
+        ...     train_timesteps=(5, 29),
+        ...     val_timesteps=(30, 33),
+        ...     test_timesteps=(34, 42)
+        ... )
+        >>>
+        >>> # Prepare graphs for different observation windows
+        >>> graphs = prepare_observation_window_graphs(
+        ...     builder, split['train'], split['val'], split['test'],
+        ...     K_values=[0, 3, 5, 7],
+        ...     device=torch.device('cpu')
+        ... )
+        >>>
+        >>> # Train model with K=5
+        >>> train_data = graphs[5]['train']
+        >>> output = model(train_data.x, train_data.edge_index)
+        >>> loss = criterion(output[train_data.eval_mask], train_data.y[train_data.eval_mask])
+        >>>
+        >>> # Compare performance across K values
+        >>> for K in [0, 3, 5, 7]:
+        ...     test_data = graphs[K]['test']
+        ...     # Evaluate only on nodes with first_appearance <= test_end
+        ...     accuracy = evaluate(model, test_data, test_data.eval_mask)
+
+    Notes:
+        - Uses builder's caching system for efficiency
+        - All nodes in graph contribute to GNN message passing
+        - Only nodes in eval_mask contribute to loss/metrics
+        - This is the CORRECT way to implement observation window experiments
+        - Avoids temporal leakage while allowing proper temporal context
+    """
+    print("\n" + "="*70)
+    print("PREPARING OBSERVATION WINDOW GRAPHS")
+    print("="*70)
+
+    # Determine split boundaries
+    train_end = int(train_nodes['first_timestep'].max())
+    val_end = int(val_nodes['first_timestep'].max())
+    test_end = int(test_nodes['first_timestep'].max())
+
+    print(f"\nSplit boundaries:")
+    print(f"  Train: first_appearance <= {train_end}")
+    print(f"  Val:   first_appearance <= {val_end}")
+    print(f"  Test:  first_appearance <= {test_end}")
+    print(f"\nObservation windows: K = {K_values}")
+
+    # Prepare result dictionary
+    results = {}
+
+    # For each observation window K
+    for K in K_values:
+        print(f"\n{'='*70}")
+        print(f"K = {K} (Observe nodes for {K} timesteps after first appearance)")
+        print('='*70)
+
+        results[K] = {}
+
+        # Process each split
+        for split_name, nodes_df, split_end in [
+            ('train', train_nodes, train_end),
+            ('val', val_nodes, val_end),
+            ('test', test_nodes, test_end)
+        ]:
+            eval_timestep = split_end + K
+
+            print(f"\n{split_name.upper()} split:")
+            print(f"  Split period: nodes with first_appearance <= {split_end}")
+            print(f"  Evaluation time: t = {split_end} + {K} = {eval_timestep}")
+            print(f"  Building graph at t={eval_timestep}...")
+
+            # Build graph at evaluation timestep
+            graph = builder.build_graph_at_timestep(eval_timestep, return_node_metadata=True)
+
+            # Create address to index mapping
+            addr_to_idx = {addr: idx for idx, addr in enumerate(graph.node_address)}
+
+            # Create evaluation mask: True for nodes with first_appearance <= split_end
+            eval_mask = torch.zeros(graph.num_nodes, dtype=torch.bool)
+
+            eval_count = 0
+            for _, node_row in nodes_df.iterrows():
+                addr = node_row['address']
+                if addr in addr_to_idx:
+                    idx = addr_to_idx[addr]
+                    eval_mask[idx] = True
+                    eval_count += 1
+
+            # Convert labels to 0/1 (licit=0, illicit=1) for binary classification
+            y = 2 - graph.y
+
+            # Move to device
+            x = graph.x.to(device)
+            edge_index = graph.edge_index.to(device)
+            y = y.to(device)
+            eval_mask = eval_mask.to(device)
+
+            # Create Data object
+            data = Data(
+                x=x,
+                edge_index=edge_index,
+                y=y,
+                eval_mask=eval_mask,
+                num_nodes=graph.num_nodes,
+                timestep=eval_timestep,
+                node_address=graph.node_address,
+                node_first_appearance=graph.node_first_appearance
+            )
+
+            # Add edge attributes if they exist
+            if hasattr(graph, 'edge_attr') and graph.edge_attr is not None:
+                data.edge_attr = graph.edge_attr.to(device)
+
+            print(f"  Graph: {graph.num_nodes:,} nodes, {graph.edge_index.shape[1]:,} edges")
+            print(f"  Eval nodes: {eval_count:,} ({100*eval_count/graph.num_nodes:.2f}% of graph)")
+
+            # Verify class distribution in eval nodes
+            eval_labels = y[eval_mask].cpu().numpy()
+            licit_count = (eval_labels == 0).sum()
+            illicit_count = (eval_labels == 1).sum()
+            print(f"    Licit: {licit_count:,} ({100*licit_count/len(eval_labels):.1f}%)")
+            print(f"    Illicit: {illicit_count:,} ({100*illicit_count/len(eval_labels):.1f}%)")
+
+            results[K][split_name] = data
+
+    print("\n" + "="*70)
+    print("✅ OBSERVATION WINDOW GRAPHS PREPARED")
+    print("="*70)
+    print(f"\nCreated graphs for {len(K_values)} observation windows × 3 splits")
+    print(f"Total: {len(K_values) * 3} graphs")
+    print("\nUsage:")
+    print("  train_data = graphs[K]['train']")
+    print("  output = model(train_data.x, train_data.edge_index)")
+    print("  loss = criterion(output[train_data.eval_mask], train_data.y[train_data.eval_mask])")
+    print("="*70 + "\n")
+
+    return results
+
+
+def prepare_temporal_model_graphs(
+    builder: TemporalNodeClassificationBuilder,
+    train_nodes: pd.DataFrame,
+    val_nodes: pd.DataFrame,
+    test_nodes: pd.DataFrame,
+    K_values: List[int],
+    device: torch.device
+) -> Dict[int, Dict[str, Dict]]:
+    """
+    Prepare graph sequences for temporal GNN models (e.g., EvolveGCN, TGN).
+
+    Unlike static models that use a single graph snapshot, temporal models process
+    sequences of graphs over time. This function creates proper sequences where:
+
+    1. Input: Graph sequence from split_start to (split_end + K)
+    2. Evaluation masks change over time:
+       - For t <= split_end: Evaluate all nodes with first_appearance <= t
+       - For t > split_end: Only evaluate nodes with first_appearance <= split_end
+
+    This setup allows temporal models to learn from the evolution of the graph structure
+    and node features over time, while maintaining proper temporal evaluation boundaries.
+
+    Args:
+        builder: TemporalNodeClassificationBuilder instance
+        train_nodes: DataFrame with columns ['address', 'first_timestep', 'class']
+        val_nodes: DataFrame for validation nodes
+        test_nodes: DataFrame for test nodes
+        K_values: List of observation windows (e.g., [0, 3, 5, 7])
+        device: torch device (cpu/cuda/mps)
+
+    Returns:
+        Dictionary mapping K values to split dictionaries:
+        {
+            0: {
+                'train': {
+                    'graphs': [Data, Data, ...],  # List of graphs from train_start to train_end+K
+                    'split_start': 5,
+                    'split_end': 29,
+                    'sequence_length': 25  # Number of timesteps
+                },
+                'val': {...},
+                'test': {...}
+            },
+            3: {...},
+            ...
+        }
+
+        Each Data object in the sequence contains:
+        - x: node features [num_nodes, num_features]
+        - edge_index: edge indices [2, num_edges]
+        - y: node labels [num_nodes] (0=licit, 1=illicit)
+        - eval_mask: which nodes to evaluate at this timestep [num_nodes]
+        - num_nodes: total nodes in graph
+        - timestep: the timestep this graph represents
+        - node_address: list of addresses
+        - node_first_appearance: when each node first appeared
+
+    Example:
+        >>> # Setup
+        >>> builder = TemporalNodeClassificationBuilder(nodes_df, edges_df)
+        >>> split = builder.get_train_val_test_split(
+        ...     train_timesteps=(5, 29),
+        ...     val_timesteps=(30, 33),
+        ...     test_timesteps=(34, 42)
+        ... )
+        >>>
+        >>> # Prepare temporal sequences
+        >>> sequences = prepare_temporal_model_graphs(
+        ...     builder, split['train'], split['val'], split['test'],
+        ...     K_values=[0, 5],
+        ...     device=torch.device('cpu')
+        ... )
+        >>>
+        >>> # Train temporal model with K=5
+        >>> train_seq = sequences[5]['train']
+        >>> for t, graph in enumerate(train_seq['graphs']):
+        ...     # Process graph at timestep t
+        ...     output = model(graph.x, graph.edge_index)
+        ...     # Only compute loss for nodes in eval_mask
+        ...     loss = criterion(output[graph.eval_mask], graph.y[graph.eval_mask])
+
+    Notes:
+        - Temporal models see the entire sequence during training
+        - Evaluation masks ensure only appropriate nodes are evaluated at each timestep
+        - For t > split_end, only nodes from the split period are evaluated
+        - This tests if temporal evolution helps classification
+    """
+    print("\n" + "="*70)
+    print("PREPARING TEMPORAL MODEL GRAPH SEQUENCES")
+    print("="*70)
+
+    # Determine split boundaries
+    train_start = int(train_nodes['first_timestep'].min())
+    train_end = int(train_nodes['first_timestep'].max())
+    val_start = int(val_nodes['first_timestep'].min())
+    val_end = int(val_nodes['first_timestep'].max())
+    test_start = int(test_nodes['first_timestep'].min())
+    test_end = int(test_nodes['first_timestep'].max())
+
+    print(f"\nSplit boundaries:")
+    print(f"  Train: t={train_start} to t={train_end}")
+    print(f"  Val:   t={val_start} to t={val_end}")
+    print(f"  Test:  t={test_start} to t={test_end}")
+    print(f"\nObservation windows: K = {K_values}")
+
+    results = {}
+
+    for K in K_values:
+        print(f"\n{'='*70}")
+        print(f"K = {K} (Observation window)")
+        print('='*70)
+
+        results[K] = {}
+
+        for split_name, nodes_df, split_start, split_end in [
+            ('train', train_nodes, train_start, train_end),
+            ('val', val_nodes, val_start, val_end),
+            ('test', test_nodes, test_start, test_end)
+        ]:
+            # Sequence goes from split_start to split_end + K
+            sequence_end = split_end + K
+            timesteps = list(range(split_start, sequence_end + 1))
+
+            print(f"\n{split_name.upper()} split:")
+            print(f"  Sequence: t={split_start} to t={sequence_end} ({len(timesteps)} timesteps)")
+            print(f"  Split period: nodes with first_appearance <= {split_end}")
+
+            # Build graphs for each timestep in sequence
+            graphs_sequence = []
+
+            for t in timesteps:
+                # Build graph at timestep t
+                graph = builder.build_graph_at_timestep(t, return_node_metadata=True)
+
+                # Create address to index mapping
+                addr_to_idx = {addr: idx for idx, addr in enumerate(graph.node_address)}
+
+                # Create evaluation mask based on timestep
+                # IMPORTANT: Only evaluate nodes with known labels (class 1 or 2, not 3)
+                eval_mask = torch.zeros(graph.num_nodes, dtype=torch.bool)
+
+                if t <= split_end:
+                    # For timesteps within split period: evaluate all nodes that appeared by t
+                    # BUT only if they have known labels (exclude class 3 = unknown)
+                    eval_count = 0
+                    for addr in graph.node_address:
+                        idx = addr_to_idx[addr]
+                        node_class = graph.y[idx].item()
+                        # Only include nodes with known class (1=illicit, 2=licit, not 3=unknown)
+                        if builder.first_appearance[addr] <= t and node_class in [1, 2]:
+                            eval_mask[idx] = True
+                            eval_count += 1
+                else:
+                    # For timesteps in observation window: only evaluate nodes from split period
+                    # nodes_df already has filter_unknown applied, so all nodes here have known labels
+                    eval_count = 0
+                    for _, node_row in nodes_df.iterrows():
+                        addr = node_row['address']
+                        if addr in addr_to_idx:
+                            idx = addr_to_idx[addr]
+                            eval_mask[idx] = True
+                            eval_count += 1
+
+                # Convert labels to 0/1 (licit=0, illicit=1)
+                # Note: class 3 (unknown) becomes -1, but these are excluded by eval_mask
+                y = 2 - graph.y
+
+                # Move to device
+                x = graph.x.to(device)
+                edge_index = graph.edge_index.to(device)
+                y = y.to(device)
+                eval_mask = eval_mask.to(device)
+
+                # Create Data object
+                data = Data(
+                    x=x,
+                    edge_index=edge_index,
+                    y=y,
+                    eval_mask=eval_mask,
+                    num_nodes=graph.num_nodes,
+                    timestep=t,
+                    node_address=graph.node_address,
+                    node_first_appearance=graph.node_first_appearance
+                )
+
+                # Add edge attributes if they exist
+                if hasattr(graph, 'edge_attr') and graph.edge_attr is not None:
+                    data.edge_attr = graph.edge_attr.to(device)
+
+                graphs_sequence.append(data)
+
+            print(f"  Built {len(graphs_sequence)} graphs")
+            print(f"  First graph: {graphs_sequence[0].num_nodes:,} nodes, {graphs_sequence[0].edge_index.shape[1]:,} edges")
+            print(f"  Last graph:  {graphs_sequence[-1].num_nodes:,} nodes, {graphs_sequence[-1].edge_index.shape[1]:,} edges")
+
+            # Store sequence
+            results[K][split_name] = {
+                'graphs': graphs_sequence,
+                'split_start': split_start,
+                'split_end': split_end,
+                'sequence_length': len(graphs_sequence)
+            }
+
+    print("\n" + "="*70)
+    print("✅ TEMPORAL MODEL SEQUENCES PREPARED")
+    print("="*70)
+    print(f"\nCreated sequences for {len(K_values)} observation windows × 3 splits")
+    print("\nUsage:")
+    print("  train_seq = sequences[K]['train']")
+    print("  for graph in train_seq['graphs']:")
+    print("      output = model(graph.x, graph.edge_index)")
+    print("      loss = criterion(output[graph.eval_mask], graph.y[graph.eval_mask])")
+    print("="*70 + "\n")
+
+    return results
 
 
 if __name__ == "__main__":
