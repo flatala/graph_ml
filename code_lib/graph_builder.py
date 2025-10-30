@@ -747,7 +747,8 @@ def build_emergence_graph_at_timestep(
     time_horizon: int = 3,
     ignore_illict: bool = True,
     ignore_previously_transacting_with_illicit: bool = True,
-    profile: bool = False
+    profile: bool = False,
+    cumulative: bool = False
 ) -> Data:
     """
     Build a temporal graph snapshot at a given time step for emergence prediction.
@@ -785,7 +786,10 @@ def build_emergence_graph_at_timestep(
             If True, nodes with illicit transaction history receive default labels
         profile: bool, default=False
             If True, print detailed timing information for each step
-
+        cumulative: bool, default=False
+            If True, builds a monotonically increasing grpah by iteratively adding the next timestep to the current graph.
+            Otherwise, builds a seperate graph for each timestep
+    
     Returns:
         Data: PyTorch Geometric Data object with attributes:
             - x: node features [num_nodes, num_features]
@@ -800,10 +804,17 @@ def build_emergence_graph_at_timestep(
     t_start = time.time()
     
     # step 1: get all nodes and edges up to current time step
-    t0 = time.time()
-    nodes_up_to_t = nodes_with_classes_df[nodes_with_classes_df['Time step'] <= current_time_step]
-    edges_up_to_t = edges_with_labels_df[edges_with_labels_df['Time step'] <= current_time_step]
-    timings['filter_data'] = time.time() - t0
+    if cumulative:
+        t0 = time.time()
+        nodes_up_to_t = nodes_with_classes_df[nodes_with_classes_df['Time step'] <= current_time_step]
+        edges_up_to_t = edges_with_labels_df[edges_with_labels_df['Time step'] <= current_time_step]
+        timings['filter_data'] = time.time() - t0
+    else:
+        t0 = time.time()
+        nodes_up_to_t = nodes_with_classes_df[nodes_with_classes_df['Time step'] == current_time_step]
+        edges_up_to_t = edges_with_labels_df[edges_with_labels_df['Time step'] == current_time_step]
+        timings['filter_data'] = time.time() - t0
+        
     
     # step 2: get active addresses (thise that have already emerged at t)
     t0 = time.time()
@@ -898,6 +909,7 @@ def build_emergence_graphs_for_time_range(
     ignore_illict: bool = True,
     ignore_previously_transacting_with_illicit: bool = True,
     profile: bool = False,
+    cumulative: bool = False
 ):
     """
     Build a sequence of emergence prediction graphs across multiple time steps.
@@ -948,6 +960,9 @@ def build_emergence_graphs_for_time_range(
             wont be counting towards their current neihbours positive labelling
         profile: bool, default=False
             If True, print detailed timing information for each step (useful for debugging performance)
+        cumulative: bool, default=False
+            If True, builds a monotonically increasing grpah by iteratively adding the next timestep to the current graph.
+            Otherwise, builds a seperate graph for each timestep
 
     Returns:
         list[Data]: List of PyTorch Geometric Data objects, one per time step, where each contains:
@@ -1006,7 +1021,8 @@ def build_emergence_graphs_for_time_range(
             time_horizon=time_horizon,
             ignore_illict=ignore_illict,
             ignore_previously_transacting_with_illicit=ignore_previously_transacting_with_illicit,
-            profile=profile
+            profile=profile,
+            cumulative=cumulative
         )
         graphs.append(graph)
         
