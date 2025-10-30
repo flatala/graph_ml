@@ -1,5 +1,7 @@
 # Dataset Split Configuration
 
+**NOTE:** for fixed code usages look at **`notebooks/experiments/*`**
+
 ## Timestep Ranges
 - **Train**: timesteps 5-29
 - **Val**: timesteps 30-33

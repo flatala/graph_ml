@@ -943,18 +943,23 @@ def prepare_temporal_model_graphs(
                 addr_to_idx = {addr: idx for idx, addr in enumerate(graph.node_address)}
 
                 # Create evaluation mask based on timestep
+                # IMPORTANT: Only evaluate nodes with known labels (class 1 or 2, not 3)
                 eval_mask = torch.zeros(graph.num_nodes, dtype=torch.bool)
 
                 if t <= split_end:
                     # For timesteps within split period: evaluate all nodes that appeared by t
+                    # BUT only if they have known labels (exclude class 3 = unknown)
                     eval_count = 0
                     for addr in graph.node_address:
                         idx = addr_to_idx[addr]
-                        if builder.first_appearance[addr] <= t:
+                        node_class = graph.y[idx].item()
+                        # Only include nodes with known class (1=illicit, 2=licit, not 3=unknown)
+                        if builder.first_appearance[addr] <= t and node_class in [1, 2]:
                             eval_mask[idx] = True
                             eval_count += 1
                 else:
                     # For timesteps in observation window: only evaluate nodes from split period
+                    # nodes_df already has filter_unknown applied, so all nodes here have known labels
                     eval_count = 0
                     for _, node_row in nodes_df.iterrows():
                         addr = node_row['address']
@@ -964,6 +969,7 @@ def prepare_temporal_model_graphs(
                             eval_count += 1
 
                 # Convert labels to 0/1 (licit=0, illicit=1)
+                # Note: class 3 (unknown) becomes -1, but these are excluded by eval_mask
                 y = 2 - graph.y
 
                 # Move to device
