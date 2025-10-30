@@ -127,6 +127,122 @@ def build_edge_index(edges_up_to_t, address_id_map_until_t):
     return torch.tensor(edge_index, dtype=torch.long)
 
 
+def compute_temporal_edge_weights(edges_up_to_t, address_id_map_until_t, current_time_t, 
+                                 decay_lambda=0.05, temperature_tau=1.0, 
+                                 value_column='total_BTC_sum', timestep_column='Time step_max'):
+    """
+    Compute temporal edge weights using the three-step process:
+    1. Within-step sum (aggregate multiple transactions in same timestep)
+    2. Time-decayed per-edge score with exponential decay
+    3. Temperature-softmax over incoming edges (normalize to 1 per destination)
+    
+    Args:
+        edges_up_to_t: DataFrame with edge data up to current time step
+                      Must contain columns: 'input_address', 'output_address', value_column, timestep_column
+        address_id_map_until_t: dict mapping address -> local node ID
+        current_time_t: int, current time step for snapshot
+        decay_lambda: float, decay rate (default: 0.05, recommended range [0.01, 0.1])
+        temperature_tau: float, temperature for softmax (default: 1.0, recommended range [0.5, 2.0])
+        value_column: str, column name containing transaction values (default: 'total_BTC_sum')
+        timestep_column: str, column name containing timesteps (default: 'Time step_max')
+    
+    Returns:
+        torch.Tensor: edge_index [2, num_edges]
+        torch.Tensor: edge_weights [num_edges] with temperature-softmax normalized weights
+    """
+    
+    # Filter edges where both endpoints exist and timestep <= current_time_t (causality)
+    valid_src = edges_up_to_t['input_address'].isin(address_id_map_until_t.keys())
+    valid_dst = edges_up_to_t['output_address'].isin(address_id_map_until_t.keys())
+    valid_time = edges_up_to_t[timestep_column] <= current_time_t
+    edges_valid = edges_up_to_t[valid_src & valid_dst & valid_time].copy()
+    
+    if len(edges_valid) == 0:
+        return torch.empty((2, 0), dtype=torch.long), torch.empty(0, dtype=torch.float)
+    
+    # Compute per-step scale (median transaction value) for robust value transform
+    step_medians = edges_valid.groupby(timestep_column)[value_column].median()
+    
+    # Apply robust value transform: g(v) = log(1 + v / σ_s)
+    def robust_transform(row):
+        v = row[value_column]
+        sigma_s = step_medians[row[timestep_column]]
+        # Clip extreme values at 99th percentile before transform
+        v_clipped = np.clip(v, 0, np.percentile(edges_valid[value_column], 99))
+        return np.log(1 + v_clipped / max(sigma_s, 1e-8))  # avoid division by zero
+    
+    edges_valid['transformed_value'] = edges_valid.apply(robust_transform, axis=1)
+    
+    # Step 1: Within-step sum (aggregate multiple transactions in same timestep)
+    # A_{ji}^{(s)} = sum over k in T_{ji}^{(s)} of g(v_k)
+    edge_step_agg = edges_valid.groupby(['input_address', 'output_address', timestep_column])['transformed_value'].sum().reset_index()
+    
+    # Step 2: Time-decayed per-edge score
+    # S_{ji}(t) = sum over s <= t of A_{ji}^{(s)} * exp(-λ(t-s))
+    edge_step_agg['decay_factor'] = np.exp(-decay_lambda * (current_time_t - edge_step_agg[timestep_column]))
+    edge_step_agg['decayed_score'] = edge_step_agg['transformed_value'] * edge_step_agg['decay_factor']
+    
+    # Aggregate across all timesteps for each edge
+    edge_scores = edge_step_agg.groupby(['input_address', 'output_address'])['decayed_score'].sum().reset_index()
+    edge_scores.columns = ['input_address', 'output_address', 'score']
+    
+    # Step 3: Temperature-softmax over incoming edges
+    # α_{ji}(t) = exp(S_{ji}(t)/τ) / sum over ℓ∈N_in(i) of exp(S_{ℓi}(t)/τ)
+    
+    # Group by destination address to compute softmax denominator
+    edge_scores['score_over_tau'] = edge_scores['score'] / temperature_tau
+    
+    # Apply max-subtraction trick for numerical stability
+    max_scores_per_dst = edge_scores.groupby('output_address')['score_over_tau'].transform('max')
+    edge_scores['score_over_tau_stable'] = edge_scores['score_over_tau'] - max_scores_per_dst
+    
+    # Compute softmax
+    edge_scores['exp_score'] = np.exp(edge_scores['score_over_tau_stable'])
+    softmax_denoms = edge_scores.groupby('output_address')['exp_score'].transform('sum')
+    edge_scores['alpha_weight'] = edge_scores['exp_score'] / softmax_denoms
+    
+    # Map addresses to local IDs and build edge_index and edge_weights
+    src_ids = edge_scores['input_address'].map(address_id_map_until_t).values
+    dst_ids = edge_scores['output_address'].map(address_id_map_until_t).values
+    weights = edge_scores['alpha_weight'].values
+    
+    # Stack into edge_index
+    edge_index = np.stack([src_ids, dst_ids], axis=0)
+    
+    return torch.tensor(edge_index, dtype=torch.long), torch.tensor(weights, dtype=torch.float)
+
+
+def compute_temporal_edge_weights_with_defaults(edges_up_to_t, address_id_map_until_t, current_time_t,
+                                               decay_lambda=None, temperature_tau=None, 
+                                               value_column='total_BTC_sum', timestep_column='Time step_max'):
+    """
+    Wrapper function that applies recommended default hyperparameters.
+    
+    Recommended defaults:
+    - decay_lambda ∈ [0.01, 0.1] (log-scale tuning) - default: 0.05
+    - temperature_tau ∈ [0.5, 2.0] (lower τ focuses more on recent/large-value edges) - default: 1.0
+    
+    Args:
+        Same as compute_temporal_edge_weights, but with smart defaults
+        
+    Returns:
+        Same as compute_temporal_edge_weights
+    """
+    
+    # Set recommended defaults
+    if decay_lambda is None:
+        decay_lambda = 0.05  # middle of recommended range [0.01, 0.1]
+        
+    if temperature_tau is None:
+        temperature_tau = 1.0  # middle of recommended range [0.5, 2.0]
+    
+    return compute_temporal_edge_weights(
+        edges_up_to_t, address_id_map_until_t, current_time_t,
+        decay_lambda=decay_lambda, temperature_tau=temperature_tau,
+        value_column=value_column, timestep_column=timestep_column
+    )
+
+
 def build_undirected_adjacency_matrix(edge_index: torch.Tensor, num_nodes: int):
     """
     Build symmetric sparse adjacency matrix from edge_index.
@@ -1045,3 +1161,112 @@ def build_emergence_graphs_for_time_range(
         print("="*60)
 
     return graphs
+
+
+def compute_temporal_edge_weights_from_raw_transactions(
+    tx_features_df, addr_tx_df, tx_addr_df, addr_tx_addr_df,
+    address_id_map_until_t, current_time_t,
+    decay_lambda=0.05, temperature_tau=1.0):
+    """
+    Compute temporal edge weights from raw transaction data using the three-step process.
+    This function handles the case where we have separate transaction files rather than 
+    pre-aggregated edge data.
+    
+    Args:
+        tx_features_df: DataFrame with transaction features including 'txId', 'Time step', 'total_BTC'
+        addr_tx_df: DataFrame with address-to-transaction edges ('input_address', 'txId')  
+        tx_addr_df: DataFrame with transaction-to-address edges ('txId', 'output_address')
+        addr_tx_addr_df: DataFrame with aggregated address-to-address transactions (optional, can be None)
+        address_id_map_until_t: dict mapping address -> local node ID
+        current_time_t: int, current time step for snapshot
+        decay_lambda: float, decay rate (default: 0.05)
+        temperature_tau: float, temperature for softmax (default: 1.0)
+    
+    Returns:
+        torch.Tensor: edge_index [2, num_edges]
+        torch.Tensor: edge_weights [num_edges] with temperature-softmax normalized weights
+    """
+    
+    # If we have pre-aggregated addr-to-addr data, use it directly
+    if addr_tx_addr_df is not None and 'total_BTC_sum' in addr_tx_addr_df.columns:
+        return compute_temporal_edge_weights(
+            addr_tx_addr_df, address_id_map_until_t, current_time_t,
+            decay_lambda=decay_lambda, temperature_tau=temperature_tau,
+            value_column='total_BTC_sum', timestep_column='Time step_max'
+        )
+    
+    # Otherwise, reconstruct addr-to-addr transactions from raw data
+    
+    # Filter transactions up to current time (causality)
+    tx_valid = tx_features_df[tx_features_df['Time step'] <= current_time_t].copy()
+    
+    if len(tx_valid) == 0:
+        return torch.empty((2, 0), dtype=torch.long), torch.empty(0, dtype=torch.float)
+    
+    # Join addr_tx with tx_features to get input_address + time + value
+    addr_tx_with_features = addr_tx_df.merge(
+        tx_valid[['txId', 'Time step', 'total_BTC']], 
+        on='txId', how='inner'
+    )
+    
+    # Join with tx_addr to get output_address  
+    full_transactions = addr_tx_with_features.merge(
+        tx_addr_df, on='txId', how='inner'
+    )
+    
+    # Filter to only include addresses that exist in our address map
+    valid_src = full_transactions['input_address'].isin(address_id_map_until_t.keys())
+    valid_dst = full_transactions['output_address'].isin(address_id_map_until_t.keys())
+    transactions_valid = full_transactions[valid_src & valid_dst].copy()
+    
+    if len(transactions_valid) == 0:
+        return torch.empty((2, 0), dtype=torch.long), torch.empty(0, dtype=torch.float)
+    
+    # Aggregate by (input_address, output_address, Time step) to get within-step sums
+    # This implements Step 1: A_{ji}^{(s)} = sum over transactions in timestep s
+    
+    # Compute per-step scale (median transaction value) for robust value transform
+    step_medians = transactions_valid.groupby('Time step')['total_BTC'].median()
+    
+    # Apply robust value transform: g(v) = log(1 + v / σ_s)
+    def robust_transform(row):
+        v = row['total_BTC']
+        sigma_s = step_medians[row['Time step']]
+        # Clip extreme values at 99th percentile before transform
+        v_clipped = np.clip(v, 0, np.percentile(transactions_valid['total_BTC'], 99))
+        return np.log(1 + v_clipped / max(sigma_s, 1e-8))  # avoid division by zero
+    
+    transactions_valid['transformed_value'] = transactions_valid.apply(robust_transform, axis=1)
+    
+    # Step 1: Within-step sum
+    edge_step_agg = transactions_valid.groupby(['input_address', 'output_address', 'Time step'])['transformed_value'].sum().reset_index()
+    
+    # Step 2: Time-decayed per-edge score
+    edge_step_agg['decay_factor'] = np.exp(-decay_lambda * (current_time_t - edge_step_agg['Time step']))
+    edge_step_agg['decayed_score'] = edge_step_agg['transformed_value'] * edge_step_agg['decay_factor']
+    
+    # Aggregate across all timesteps for each edge
+    edge_scores = edge_step_agg.groupby(['input_address', 'output_address'])['decayed_score'].sum().reset_index()
+    edge_scores.columns = ['input_address', 'output_address', 'score']
+    
+    # Step 3: Temperature-softmax over incoming edges
+    edge_scores['score_over_tau'] = edge_scores['score'] / temperature_tau
+    
+    # Apply max-subtraction trick for numerical stability
+    max_scores_per_dst = edge_scores.groupby('output_address')['score_over_tau'].transform('max')
+    edge_scores['score_over_tau_stable'] = edge_scores['score_over_tau'] - max_scores_per_dst
+    
+    # Compute softmax
+    edge_scores['exp_score'] = np.exp(edge_scores['score_over_tau_stable'])
+    softmax_denoms = edge_scores.groupby('output_address')['exp_score'].transform('sum')
+    edge_scores['alpha_weight'] = edge_scores['exp_score'] / softmax_denoms
+    
+    # Map addresses to local IDs and build edge_index and edge_weights
+    src_ids = edge_scores['input_address'].map(address_id_map_until_t).values
+    dst_ids = edge_scores['output_address'].map(address_id_map_until_t).values
+    weights = edge_scores['alpha_weight'].values
+    
+    # Stack into edge_index
+    edge_index = np.stack([src_ids, dst_ids], axis=0)
+    
+    return torch.tensor(edge_index, dtype=torch.long), torch.tensor(weights, dtype=torch.float)

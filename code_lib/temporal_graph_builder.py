@@ -49,10 +49,7 @@ def convert_to_temporal_snapshots(snapshots: List[Data]) -> DynamicGraphTemporal
     targets  = [d.y.cpu().numpy() for d in snapshots]
     return DynamicGraphTemporalSignal(edge_indices, edge_weights, features, targets)
 
-def convert_to_event_stream(snapshots: List[Data], dense: bool):
-    """
-    Converts a given PyG Data object into a temporal event stream data object for use
-    in the temporal data loader and TGN. 
+def convert_to_event_stream():
 
     Args:
         snapshots: List[Data]
