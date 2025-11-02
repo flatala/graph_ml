@@ -209,3 +209,8 @@ __marimo__/
 .DS_Store
 # caches
 graph_cache/
+
+# large local artifacts
+graph_cache*/
+graph_cache_reduced_features/
+models/*.pt
