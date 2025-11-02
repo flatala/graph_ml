@@ -42,13 +42,15 @@ class TemporalNodeClassificationBuilder:
         add_temporal_features: bool = True,
         add_edge_weights: bool = False,
         edge_weight_col: Optional[str] = None,
+        use_temporal_edge_decay: bool = False,
+        temporal_decay_lambda: float = 0.5,
         verbose: bool = True,
         cache_dir: Optional[str] = None,
         use_cache: bool = True
     ):
         """
         Initialize the graph builder.
-        
+
         Args:
             nodes_df: DataFrame with columns ['address', 'Time step', 'class', ...features]
             edges_df: DataFrame with columns ['Time step', 'input_address', 'output_address', ...]
@@ -56,8 +58,15 @@ class TemporalNodeClassificationBuilder:
             include_class_as_feature: Whether to include 'class' label as a node feature
             add_temporal_features: Whether to add temporal features (age, degree over time)
             add_edge_weights: Whether to include edge weights in the graph
-            edge_weight_col: Column name for edge weights. If None and add_edge_weights=True, 
+            edge_weight_col: Column name for edge weights. If None and add_edge_weights=True,
                            uses edge count (number of transactions between address pair)
+            use_temporal_edge_decay: Whether to apply temporal decay weighting to edges.
+                                    If True, edge weights are computed as exp(-λ * edge_age)
+                                    where edge_age = current_timestep - edge_timestep.
+                                    This is automatically enabled when add_edge_weights=True.
+            temporal_decay_lambda: Lambda parameter for exponential temporal decay (default 0.5).
+                                  Higher values = faster decay (older edges weighted less).
+                                  Optimal value of 0.5 based on empirical experiments.
             verbose: Whether to print progress information
             cache_dir: Directory to store cached graphs. If None, uses './graph_cache'
             use_cache: Whether to use caching for built graphs
@@ -69,7 +78,15 @@ class TemporalNodeClassificationBuilder:
         self.add_temporal_features = add_temporal_features
         self.add_edge_weights = add_edge_weights
         self.edge_weight_col = edge_weight_col
+        self.use_temporal_edge_decay = use_temporal_edge_decay
+        self.temporal_decay_lambda = temporal_decay_lambda
         self.use_cache = use_cache
+
+        # Auto-enable edge weights if temporal decay is requested
+        if self.use_temporal_edge_decay and not self.add_edge_weights:
+            self.add_edge_weights = True
+            if self.verbose:
+                print("Auto-enabled add_edge_weights=True (required for temporal decay)")
         
         # Setup cache directory
         if cache_dir is None:
@@ -104,8 +121,13 @@ class TemporalNodeClassificationBuilder:
             print(f"  Include class as feature: {self.include_class_as_feature}")
             print(f"  Add temporal features: {self.add_temporal_features}")
             print(f"  Add edge weights: {self.add_edge_weights}")
-            if self.add_edge_weights and self.edge_weight_col:
-                print(f"  Edge weight column: {self.edge_weight_col}")
+            if self.add_edge_weights:
+                if self.use_temporal_edge_decay:
+                    print(f"  Temporal edge decay: ENABLED (λ={self.temporal_decay_lambda})")
+                elif self.edge_weight_col:
+                    print(f"  Edge weight column: {self.edge_weight_col}")
+                else:
+                    print(f"  Edge weights: Uniform (all 1.0)")
     
     def _preprocess_data(self):
         """Pre-compute mappings and statistics for efficient graph building."""
@@ -147,6 +169,11 @@ class TemporalNodeClassificationBuilder:
         """Generate cache file path for a specific graph."""
         # Create a unique identifier based on configuration
         config_str = f"t{timestep}_meta{return_node_metadata}_class{self.include_class_as_feature}_temp{self.add_temporal_features}_weights{self.add_edge_weights}"
+
+        # Add temporal decay config to cache key if enabled
+        if self.use_temporal_edge_decay:
+            config_str += f"_decay{self.temporal_decay_lambda}"
+
         return os.path.join(self.cache_dir, f"graph_{config_str}.pt")
     
     def _save_graph_to_cache(self, graph: Data, timestep: int, return_node_metadata: bool):
@@ -260,7 +287,11 @@ class TemporalNodeClassificationBuilder:
                     
                     # Add edge weights if requested
                     if self.add_edge_weights:
-                        if self.edge_weight_col and self.edge_weight_col in valid_edges.columns:
+                        if self.use_temporal_edge_decay:
+                            # Apply exponential temporal decay: weight = exp(-λ * edge_age)
+                            edge_age = timestep - t  # Current time - edge creation time
+                            weights = np.exp(-self.temporal_decay_lambda * edge_age)
+                        elif self.edge_weight_col and self.edge_weight_col in valid_edges.columns:
                             # Use specified column for weights
                             weights = valid_edges[self.edge_weight_col].values
                         else:
