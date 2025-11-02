@@ -290,7 +290,9 @@ class TemporalNodeClassificationBuilder:
                         if self.use_temporal_edge_decay:
                             # Apply exponential temporal decay: weight = exp(-λ * edge_age)
                             edge_age = timestep - t  # Current time - edge creation time
-                            weights = np.exp(-self.temporal_decay_lambda * edge_age)
+                            decay_weight = np.exp(-self.temporal_decay_lambda * edge_age)
+                            # Apply same decay weight to all edges from this timestep
+                            weights = np.full(len(valid_edges), decay_weight, dtype=np.float32)
                         elif self.edge_weight_col and self.edge_weight_col in valid_edges.columns:
                             # Use specified column for weights
                             weights = valid_edges[self.edge_weight_col].values
