@@ -242,3 +242,74 @@ def load_cached_graphs(
     """
     cache_path = Path(cache_dir) / cache_name
     return load_graphs(cache_path, prefix=prefix)
+
+
+from sklearn.feature_selection import VarianceThreshold
+
+def remove_low_variance_features(nodes_df, threshold=0.01, verbose=True):
+    """Remove features with variance below threshold."""
+    exclude_cols = {'address', 'Time step', 'class'}
+    feature_cols = [col for col in nodes_df.columns 
+                    if col not in exclude_cols and 
+                    pd.api.types.is_numeric_dtype(nodes_df[col])]
+    
+    # Sample for speed
+    sample_df = nodes_df[feature_cols].sample(n=min(10000, len(nodes_df)), random_state=42)
+    
+    selector = VarianceThreshold(threshold=threshold)
+    selector.fit(sample_df)
+    
+    kept_features = [col for col, keep in zip(feature_cols, selector.get_support()) if keep]
+    
+    if verbose:
+        print(f"Removed {len(feature_cols) - len(kept_features)} low-variance features")
+        print(f"Kept {len(kept_features)} features")
+    
+    return kept_features
+
+def remove_correlated_features(nodes_df, threshold=0.95, verbose=True):
+    """
+    Remove highly correlated features from nodes DataFrame.
+    
+    Args:
+        nodes_df: DataFrame with node features
+        threshold: Correlation threshold (default 0.95)
+        verbose: Print removed features
+    
+    Returns:
+        nodes_df with correlated features removed
+        list of kept feature columns
+    """
+    # Identify feature columns (exclude address, Time step, class)
+    exclude_cols = {'address', 'Time step', 'class'}
+    feature_cols = [col for col in nodes_df.columns 
+                    if col not in exclude_cols and 
+                    pd.api.types.is_numeric_dtype(nodes_df[col])]
+    
+    # Compute correlation matrix on a sample (for speed)
+    sample_size = min(10000, len(nodes_df))
+    sample_df = nodes_df[feature_cols].sample(n=sample_size, random_state=42)
+    corr_matrix = sample_df.corr().abs()
+    
+    # Find features to remove
+    upper_tri = np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+    to_remove = set()
+    
+    for i in range(len(corr_matrix.columns)):
+        for j in range(i+1, len(corr_matrix.columns)):
+            if corr_matrix.iloc[i, j] > threshold:
+                # Remove the second feature (arbitrary choice)
+                feature_to_remove = corr_matrix.columns[j]
+                to_remove.add(feature_to_remove)
+                if verbose:
+                    print(f"Removing {feature_to_remove} (corr={corr_matrix.iloc[i, j]:.3f} with {corr_matrix.columns[i]})")
+    
+    # Keep features
+    features_to_keep = [col for col in feature_cols if col not in to_remove]
+    
+    if verbose:
+        print(f"\nOriginal features: {len(feature_cols)}")
+        print(f"Removed features:  {len(to_remove)}")
+        print(f"Kept features:     {len(features_to_keep)}")
+    
+    return features_to_keep
