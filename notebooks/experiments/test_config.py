@@ -8,10 +8,10 @@ EXPERIMENT_CONFIG = {
     'observation_windows': [1, 3, 5, 7],
     'hidden_dim': 128,
     'dropout': 0.3,
-    'learning_rate': 0.001,
+    'learning_rate': 0.002,
     'weight_decay': 1e-5,
-    'epochs': 100,
+    'epochs': 150,
     'patience': 15,
     'seed': 42,
-    'device': 'mps'
+    'device': 'cuda'
 }
