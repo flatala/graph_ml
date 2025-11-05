@@ -1,0 +1,45 @@
+{
+  "experiment": "comprehensive_gnn_comparison_with_timing",
+  "models_compared": {
+    "standard_gcn": "Standard GCN",
+    "sampled_gcn": "GCN + Sampling [25, 10]",
+    "standard_sage": "GraphSAGE",
+    "sampled_sage": "GraphSAGE + Sampling [25, 10]"
+  },
+  "sampling_enabled": true,
+  "hyperparameters": {
+    "hidden_dim": 128,
+    "dropout": 0.3,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-05,
+    "epochs": 10,
+    "patience": 20
+  },
+  "sampling_config": {
+    "num_neighbors": [
+      25,
+      10
+    ],
+    "batch_size": 1024,
+    "num_workers": 4
+  },
+  "aggregator": "mean",
+  "normalize": true,
+  "observation_windows": [
+    1,
+    3,
+    5,
+    7
+  ],
+  "timing_metrics_tracked": [
+    "total_time",
+    "init_time",
+    "training_time",
+    "final_eval_time",
+    "avg_epoch_time",
+    "avg_train_step_time",
+    "avg_eval_time",
+    "epochs_per_second",
+    "samples_per_second"
+  ]
+}

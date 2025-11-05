@@ -13,5 +13,5 @@ EXPERIMENT_CONFIG = {
     'epochs': 100,
     'patience': 15,
     'seed': 42,
-    'device': 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+    'device': 'mps'
 }
