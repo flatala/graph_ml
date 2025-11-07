@@ -586,12 +586,14 @@ def load_elliptic_data(data_dir: str, use_temporal_features: bool = True) -> Tup
     from code_lib.utils import load_parts
     
     if use_temporal_features:
+        print("Loading trmporal features...")
         # Load temporal features (computed only up to each timestep - NO LEAKAGE)
         features_df = pd.read_csv(
             os.path.join(data_dir, "wallets_features_until_t.csv")
         )
         
         # Load class labels separately
+        print("Loading node classes...")
         classes_df = pd.read_csv(
             os.path.join(data_dir, "wallets_features_classes_combined.csv"),
             usecols=['address', 'class']
@@ -610,6 +612,7 @@ def load_elliptic_data(data_dir: str, use_temporal_features: bool = True) -> Tup
         )
     
     # Load edge data (using parts)
+    print("Loading edges...")
     edges_df = load_parts(data_dir, "AddrTxAddr_edgelist_part_")
     
     return nodes_df, edges_df
