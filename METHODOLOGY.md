@@ -132,6 +132,7 @@ For each cohort t ∈ [37, 43]:
 | **MLP + Graph Features** | Updated centrality values + aggregates |
 | **Static GCN** | Updated feature aggregates propagated via message passing |
 | **Temporal GCN (EvolveGCN)** | Temporal structure + evolving graph dynamics |
+|**Temporal Graph Network**| Temporal structure + evolving graph dynamics
 
 ### Key Hypotheses
 1. All models should improve with larger K (more information)
