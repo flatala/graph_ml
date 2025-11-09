@@ -342,16 +342,6 @@ Graph snapshots are automatically cached to `graph_cache/` for faster repeated e
 
 ---
 
-## Documentation
-
-- [METHODOLOGY.md](METHODOLOGY.md) - Detailed research protocol and temporal methodology
-- [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - Temporal edge weighting implementation
-- [MULTI_SEED_IMPLEMENTATION_GUIDE.md](MULTI_SEED_IMPLEMENTATION_GUIDE.md) - Multi-seed training guide
-- [SIMPLIFIED_IMPLEMENTATION_GUIDE.md](SIMPLIFIED_IMPLEMENTATION_GUIDE.md) - Step-by-step implementation guide
-- [FINAL_TODO.md](FINAL_TODO.md) - Implementation checklist
-
----
-
 ## Citation
 
 If you use this code or methodology in your research, please cite the Elliptic dataset:
