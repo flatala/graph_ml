@@ -19,7 +19,7 @@ import os
 import pandas as pd
 import numpy as np
 import torch
-from torch_geometric.data import Data
+from torch_geometric.data import Data, TemporalData
 from typing import List, Dict, Tuple, Optional
 from tqdm import tqdm
 
@@ -399,6 +399,259 @@ class TemporalNodeClassificationBuilder:
         
         return graphs
     
+
+    def build_event_stream(
+        self,
+        start_timestep: Optional[int] = None,
+        end_timestep: Optional[int] = None,
+        dense: bool = False,
+        include_edge_attr: bool = False,
+        drop_unknown: bool = True
+    ) -> TemporalData:
+        
+        """TemporalData stream for TGN derived from non-cumulative snapshots."""
+        snapshots = self.build_snapshot_sequence(
+            start_timestep=start_timestep,
+            end_timestep=end_timestep,
+            return_node_metadata=True,
+        )
+
+        if not snapshots:
+            raise ValueError("Requested timestep range produced no graphs.")
+
+        src_list: List[torch.Tensor] = []
+        dst_list: List[torch.Tensor] = []
+        time_list: List[torch.Tensor] = []
+        msg_list: List[torch.Tensor] = []
+        label_list: List[torch.Tensor] = []
+        event_type_list: List[torch.Tensor] = []
+
+        prev_edge_map: Optional[Dict[Tuple[int, int], int]] = None
+        prev_edge_attr: Optional[torch.Tensor] = None
+        has_edge_attr = hasattr(snapshots[0], "edge_attr") and snapshots[0].edge_attr is not None
+        feature_dim = snapshots[0].x.size(1)
+        edge_feat_dim = snapshots[0].edge_attr.size(1) if has_edge_attr else 0
+        msg_dim = feature_dim * 2 + (edge_feat_dim if include_edge_attr else 0)
+
+        def _edge_map(edge_index: torch.Tensor) -> Dict[Tuple[int, int], int]:
+            src_nodes = edge_index[0].tolist()
+            dst_nodes = edge_index[1].tolist()
+            return {(u, v): idx for idx, (u, v) in enumerate(zip(src_nodes, dst_nodes))}
+
+        for t_idx, graph in enumerate(snapshots):
+            edge_index = graph.edge_index
+            current_map = _edge_map(edge_index) if edge_index.numel() > 0 else {}
+
+            if dense or prev_edge_map is None:
+                added_edges = set(current_map.keys())
+                deleted_edges: set = set()
+                changed_edges: set = set()
+            else:
+                added_edges = set(current_map.keys()) - set(prev_edge_map.keys())
+                deleted_edges = set(prev_edge_map.keys()) - set(current_map.keys())
+                changed_edges = set()
+                if has_edge_attr and prev_edge_attr is not None and graph.edge_attr is not None:
+                    for edge in set(current_map.keys()).intersection(prev_edge_map.keys()):
+                        if not torch.equal(
+                            graph.edge_attr[current_map[edge]],
+                            prev_edge_attr[prev_edge_map[edge]],
+                        ):
+                            changed_edges.add(edge)
+
+            def _append(edge_tuples, event_value, use_current=True):
+                if not edge_tuples:
+                    return
+
+                idx_list = [current_map[e] if use_current else prev_edge_map[e] for e in edge_tuples]
+                idx_tensor = torch.tensor(idx_list, dtype=torch.long)
+
+                if use_current:
+                    src = edge_index[0, idx_tensor]
+                    dst = edge_index[1, idx_tensor]
+                    src_feat = graph.x[src]
+                    dst_feat = graph.x[dst]
+
+                    if include_edge_attr and has_edge_attr and graph.edge_attr is not None:
+                        msg = torch.cat([src_feat, dst_feat, graph.edge_attr[idx_tensor]], dim=-1)
+                    else:
+                        msg = torch.cat([src_feat, dst_feat], dim=-1)
+
+                    labels = graph.y[dst].float().view(-1, 1)
+
+                    src_list.append(src)
+                    dst_list.append(dst)
+                    msg_list.append(msg)
+                    label_list.append(labels)
+                else:
+                    prev_graph = snapshots[t_idx - 1]
+                    prev_edge_index = prev_graph.edge_index
+                    src = prev_edge_index[0, idx_tensor]
+                    dst = prev_edge_index[1, idx_tensor]
+
+                    src_list.append(src)
+                    dst_list.append(dst)
+                    msg_list.append(torch.zeros((len(idx_list), msg_dim), dtype=graph.x.dtype))
+                    label_list.append(torch.zeros((len(idx_list), 1), dtype=torch.float))
+
+                time_list.append(torch.full((len(idx_list),), graph.timestep, dtype=torch.long))
+                event_type_list.append(torch.full((len(idx_list),), event_value, dtype=torch.int8))
+
+            _append(added_edges, 1, use_current=True)
+            _append(changed_edges, 0, use_current=True)
+            if prev_edge_map is not None:
+                _append(deleted_edges, -1, use_current=False)
+
+            prev_edge_map = current_map
+            prev_edge_attr = graph.edge_attr if has_edge_attr and graph.edge_attr is not None else None
+
+        if not src_list:
+            raise ValueError("No events generated for the requested range.")
+
+        event_data = TemporalData(
+            src=torch.cat(src_list),
+            dst=torch.cat(dst_list),
+            t=torch.cat(time_list),
+            msg=torch.cat(msg_list),
+        )
+        event_data.y = torch.cat(label_list).view(-1)
+        event_data.event_type = torch.cat(event_type_list)
+
+        if drop_unknown and hasattr(event_data, "y") and event_data.y.numel() > 0:
+            mask = event_data.y != 3
+            event_type = getattr(event_data, "event_type", None)
+
+            event_data = TemporalData(
+                src=event_data.src[mask],
+                dst=event_data.dst[mask],
+                t=event_data.t[mask],
+                msg=event_data.msg[mask],
+                y=event_data.y[mask],
+            )
+
+            if event_type is not None:
+                event_data.event_type = event_type[mask]
+
+        return event_data
+    
+    def build_snapshot_graph_at_timestep(
+        self,
+        timestep: int,
+        return_node_metadata: bool = True
+    ) -> Data:
+        """
+        Args:
+            timestep: Target timestep
+            return_node_metadata: Whether to include additional node metadata
+                                (first_appearance, original_address)
+        
+        Returns:
+            PyG Data object with:
+                - x: node features [num_nodes, num_features]
+                - edge_index: edge indices [2, num_edges]
+                - y: node class labels [num_nodes] (1=illicit, 2=licit, 3=unknown)
+                - num_nodes: number of nodes
+                - timestep: current timestep
+                - (optional) edge_attr: edge weights [num_edges, 1] if add_edge_weights=True
+                - (optional) node_first_appearance: first appearance time [num_nodes]
+                - (optional) node_address: original addresses [num_nodes]
+        """
+        
+        nodes_t = self.nodes_df[self.nodes_df["Time step"] == timestep].copy()
+        nodes_t = nodes_t.drop_duplicates(subset="address", keep="last")
+
+        if nodes_t.empty:
+            data = Data(
+                x=torch.empty((0, len(self.feature_cols)), dtype=torch.float),
+                edge_index=torch.empty((2, 0), dtype=torch.long),
+                y=torch.empty((0,), dtype=torch.long),
+                num_nodes=0,
+                timestep=timestep,
+            )
+            if return_node_metadata:
+                data.node_address = []
+                data.node_first_appearance = torch.empty((0,), dtype=torch.long)
+            return data
+
+        addresses = nodes_t["address"].tolist()
+        addr_to_idx = {addr: idx for idx, addr in enumerate(addresses)}
+        features = nodes_t.set_index("address")[self.feature_cols].loc[addresses].values
+
+        if self.add_temporal_features:
+            ages = np.array([timestep - self.first_appearance.get(addr, timestep) for addr in addresses])
+            features = np.column_stack([features, ages])
+
+        x = torch.tensor(features, dtype=torch.float)
+        y = torch.tensor([self.node_classes.get(addr, 3) for addr in addresses], dtype=torch.long)
+
+        edges_t = self.edges_by_timestep.get(timestep)
+        if edges_t is None or edges_t.empty:
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_attr = None
+        else:
+            edges_filtered = edges_t[
+                edges_t["input_address"].isin(addr_to_idx) &
+                edges_t["output_address"].isin(addr_to_idx)
+            ]
+            if edges_filtered.empty:
+                edge_index = torch.empty((2, 0), dtype=torch.long)
+                edge_attr = None
+            else:
+                src_idx = edges_filtered["input_address"].map(addr_to_idx).to_numpy()
+                dst_idx = edges_filtered["output_address"].map(addr_to_idx).to_numpy()
+                edge_index = torch.tensor(np.vstack([src_idx, dst_idx]), dtype=torch.long)
+
+                if self.add_edge_weights:
+                    if self.edge_weight_col and self.edge_weight_col in edges_filtered.columns:
+                        weights = edges_filtered[self.edge_weight_col].to_numpy()
+                    else:
+                        weights = np.ones(len(edges_filtered), dtype=np.float32)
+                    edge_attr = torch.tensor(weights, dtype=torch.float).unsqueeze(1)
+                else:
+                    edge_attr = None
+
+        data = Data(
+            x=x,
+            edge_index=edge_index,
+            y=y,
+            num_nodes=len(addresses),
+            timestep=timestep,
+        )
+        if edge_attr is not None:
+            data.edge_attr = edge_attr
+        if return_node_metadata:
+            data.node_address = addresses
+            data.node_first_appearance = torch.tensor(
+                [self.first_appearance.get(addr, timestep) for addr in addresses],
+                dtype=torch.long,
+            )
+
+        return data
+    
+
+    def build_snapshot_sequence(
+        self,
+        start_timestep: Optional[int] = None,
+        end_timestep: Optional[int] = None,
+        return_node_metadata: bool = True
+    ) -> List[Data]:
+        """Non-cumulative per-timestep graphs in the requested range."""
+        if start_timestep is None:
+            start_timestep = self.min_timestep
+        if end_timestep is None:
+            end_timestep = self.max_timestep
+        if start_timestep > end_timestep:
+            raise ValueError("start_timestep must be <= end_timestep")
+
+        graphs: List[Data] = []
+        timesteps = range(start_timestep, end_timestep + 1)
+        iterator = tqdm(timesteps, desc="Building snapshot graphs") if self.verbose else timesteps
+
+        for timestep in iterator:
+            graphs.append(self.build_snapshot_graph_at_timestep(timestep, return_node_metadata))
+
+        return graphs
+    
+    
     def get_train_val_test_split(
         self,
         train_timesteps: Tuple[int, int],
@@ -477,6 +730,73 @@ class TemporalNodeClassificationBuilder:
             'val': val_nodes,
             'test': test_nodes
         }
+    
+    def get_event_stream_split(
+        self,
+        train_timesteps: Tuple[int, int],
+        val_timesteps: Optional[Tuple[int, int]] = None,
+        test_timesteps: Optional[Tuple[int, int]] = None,
+        dense: bool = False,
+        include_edge_attr: bool = False,
+        drop_unknown: bool = True,
+        full_range: Optional[Tuple[int, int]] = None,
+    ) -> Dict[str, TemporalData]:
+        """
+        Build a single event stream (using existing build_event_stream) and carve it
+        into temporal splits that match the requested timestep windows.
+
+        Args:
+            train_timesteps, val_timesteps, test_timesteps:
+                Inclusive (start, end) ranges on event timestamps. val/test are optional.
+            dense, include_edge_attr, drop_unknown:
+                Passed straight through to build_event_stream.
+            full_range:
+                Optional (start, end) for the base event stream. If omitted we use the
+                union of all provided split ranges.
+
+        Returns:
+            Dict with keys present in the arguments (e.g. 'train', 'val', 'test'); each
+            value is a TemporalData object restricted to that time window.
+        """
+        split_ranges = {"train": train_timesteps}
+        if val_timesteps is not None:
+            split_ranges["val"] = val_timesteps
+        if test_timesteps is not None:
+            split_ranges["test"] = test_timesteps
+
+        if full_range is None:
+            min_ts = min(r[0] for r in split_ranges.values())
+            max_ts = max(r[1] for r in split_ranges.values())
+        else:
+            min_ts, max_ts = full_range
+
+        base_stream = self.build_event_stream(
+            start_timestep=min_ts,
+            end_timestep=max_ts,
+            dense=dense,
+            include_edge_attr=include_edge_attr,
+            drop_unknown=drop_unknown,
+        )
+
+        split_streams: Dict[str, TemporalData] = {}
+        for name, (start, end) in split_ranges.items():
+            mask = (base_stream.t >= start) & (base_stream.t <= end)
+
+            split_data = TemporalData(
+                src=base_stream.src[mask],
+                dst=base_stream.dst[mask],
+                t=base_stream.t[mask],
+                msg=base_stream.msg[mask],
+                y=base_stream.y[mask] if hasattr(base_stream, "y") else None,
+            )
+
+            if hasattr(base_stream, "event_type"):
+                split_data.event_type = base_stream.event_type[mask]
+
+            split_streams[name] = split_data
+
+        return split_streams
+
     
     def get_node_index_in_graph(
         self,
@@ -569,6 +889,7 @@ class TemporalNodeClassificationBuilder:
             print(f"  Nodes just appeared: {stats['nodes_just_appeared']}")
         
         print(f"{'='*60}")
+    
 
 
 def load_elliptic_data(data_dir: str, use_temporal_features: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -616,6 +937,8 @@ def load_elliptic_data(data_dir: str, use_temporal_features: bool = True) -> Tup
     edges_df = load_parts(data_dir, "AddrTxAddr_edgelist_part_")
     
     return nodes_df, edges_df
+
+
 
 
 # ==============================================================================
